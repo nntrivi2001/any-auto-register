@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -14,6 +15,9 @@ from services.chatgpt_account_state import is_account_deactivated_message
 DEFAULT_CLIPROXYAPI_BASE_URL = "http://127.0.0.1:8317"
 SYNC_RETRY_ATTEMPTS = 3
 SYNC_RETRY_DELAY_SECONDS = 0.4
+BATCH_PROBE_DELAY_SECONDS = 0.12
+
+logger = logging.getLogger(__name__)
 
 
 def _utcnow_iso() -> str:
@@ -103,7 +107,9 @@ def _extract_error_message(body_json: dict[str, Any], header_error_json: dict[st
 
 def _request_json(method: str, path: str, *, api_url: str | None = None, api_key: str | None = None, json_body: dict | None = None) -> Any:
     import requests
+    import urllib3
 
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     target = f"{_base_url(api_url)}{path}"
     try:
         response = requests.request(
@@ -264,25 +270,14 @@ def _probe_remote_auth(auth_index: str, account_id: str, *, api_url: str | None 
     }
 
 
-def sync_chatgpt_cliproxyapi_status(
+def _build_remote_sync_result(
     account: Any,
+    matched: dict[str, Any] | None,
+    synced_at: str,
     *,
     api_url: str | None = None,
     api_key: str | None = None,
 ) -> dict[str, Any]:
-    synced_at = _utcnow_iso()
-    try:
-        files = _retry_sync_call(lambda: list_auth_files(api_url=api_url, api_key=api_key))
-    except Exception as exc:
-        return {
-            "uploaded": False,
-            "last_synced_at": synced_at,
-            "message": str(exc),
-            "remote_state": "unreachable",
-            "base_url": _base_url(api_url),
-        }
-    matched = _match_auth_file(account, files)
-
     if not matched:
         return {
             "uploaded": False,
@@ -333,3 +328,73 @@ def sync_chatgpt_cliproxyapi_status(
     elif remote["last_probe_message"]:
         remote["message"] = remote["last_probe_message"]
     return remote
+
+
+def sync_chatgpt_cliproxyapi_status(
+    account: Any,
+    *,
+    api_url: str | None = None,
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    synced_at = _utcnow_iso()
+    try:
+        files = _retry_sync_call(lambda: list_auth_files(api_url=api_url, api_key=api_key))
+    except Exception as exc:
+        return {
+            "uploaded": False,
+            "last_synced_at": synced_at,
+            "message": str(exc),
+            "remote_state": "unreachable",
+            "base_url": _base_url(api_url),
+        }
+    matched = _match_auth_file(account, files)
+    return _build_remote_sync_result(account, matched, synced_at, api_url=api_url, api_key=api_key)
+
+
+def sync_chatgpt_cliproxyapi_status_batch(
+    accounts: list[Any],
+    *,
+    api_url: str | None = None,
+    api_key: str | None = None,
+) -> dict[int, dict[str, Any]]:
+    synced_at = _utcnow_iso()
+    results: dict[int, dict[str, Any]] = {}
+    if not accounts:
+        return results
+
+    try:
+        files = _retry_sync_call(lambda: list_auth_files(api_url=api_url, api_key=api_key))
+    except Exception as exc:
+        fallback = {
+            "uploaded": False,
+            "last_synced_at": synced_at,
+            "message": str(exc),
+            "remote_state": "unreachable",
+            "base_url": _base_url(api_url),
+        }
+        for account in accounts:
+            account_id = getattr(account, "id", None)
+            if account_id is not None:
+                results[int(account_id)] = dict(fallback)
+        logger.warning("CLIProxyAPI 批量同步失败：无法获取 auth-files, accounts=%s, error=%s", len(accounts), exc)
+        return results
+
+    for index, account in enumerate(accounts):
+        account_id = getattr(account, "id", None)
+        if account_id is None:
+            continue
+        matched = _match_auth_file(account, files)
+        results[int(account_id)] = _build_remote_sync_result(account, matched, synced_at, api_url=api_url, api_key=api_key)
+        if index < len(accounts) - 1 and matched:
+            time.sleep(BATCH_PROBE_DELAY_SECONDS)
+
+    unreachable = sum(1 for item in results.values() if str(item.get("remote_state") or "").strip().lower() == "unreachable")
+    not_found = sum(1 for item in results.values() if str(item.get("remote_state") or "").strip().lower() == "not_found")
+    logger.info(
+        "CLIProxyAPI 批量同步完成：accounts=%s, unreachable=%s, not_found=%s, base_url=%s",
+        len(results),
+        unreachable,
+        not_found,
+        _base_url(api_url),
+    )
+    return results

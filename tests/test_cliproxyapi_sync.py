@@ -1,7 +1,7 @@
 import unittest
 from unittest import mock
 
-from services.cliproxyapi_sync import _probe_remote_auth, sync_chatgpt_cliproxyapi_status
+from services.cliproxyapi_sync import _probe_remote_auth, sync_chatgpt_cliproxyapi_status, sync_chatgpt_cliproxyapi_status_batch
 
 
 class DummyAccount:
@@ -173,6 +173,67 @@ class CliproxyapiSyncTests(unittest.TestCase):
         self.assertEqual(result["remote_state"], "usable")
         self.assertEqual(probe_mock.call_count, 3)
         self.assertEqual(sleep_mock.call_count, 2)
+
+    def test_batch_sync_fetches_auth_files_once(self):
+        accounts = [
+            DummyAccount(email="a@example.com", user_id="acct-a"),
+            DummyAccount(email="missing@example.com", user_id="acct-missing"),
+            DummyAccount(email="b@example.com", user_id="acct-b"),
+        ]
+        accounts[0].id = 1
+        accounts[1].id = 2
+        accounts[2].id = 3
+
+        auth_files = [
+            {
+                "name": "a@example.com.json",
+                "provider": "codex",
+                "email": "a@example.com",
+                "auth_index": "auth-a",
+                "status": "active",
+                "status_message": "",
+                "unavailable": False,
+            },
+            {
+                "name": "b@example.com.json",
+                "provider": "codex",
+                "email": "b@example.com",
+                "auth_index": "auth-b",
+                "status": "active",
+                "status_message": "",
+                "unavailable": False,
+            },
+        ]
+
+        with mock.patch("services.cliproxyapi_sync.list_auth_files", return_value=auth_files) as list_mock:
+            with mock.patch(
+                "services.cliproxyapi_sync._probe_remote_auth",
+                side_effect=[
+                    {
+                        "last_probe_at": "2026-03-31T00:00:00Z",
+                        "last_probe_status_code": 200,
+                        "last_probe_error_code": "",
+                        "last_probe_message": "ok",
+                        "remote_state": "usable",
+                    },
+                    {
+                        "last_probe_at": "2026-03-31T00:00:01Z",
+                        "last_probe_status_code": 401,
+                        "last_probe_error_code": "token_invalidated",
+                        "last_probe_message": "invalidated",
+                        "remote_state": "access_token_invalidated",
+                    },
+                ],
+            ) as probe_mock:
+                with mock.patch("services.cliproxyapi_sync.time.sleep") as sleep_mock:
+                    result = sync_chatgpt_cliproxyapi_status_batch(accounts, api_url="http://127.0.0.1:8317", api_key="demo")
+
+        self.assertEqual(list_mock.call_count, 1)
+        self.assertEqual(probe_mock.call_count, 2)
+        self.assertEqual(result[1]["remote_state"], "usable")
+        self.assertEqual(result[2]["remote_state"], "not_found")
+        self.assertEqual(result[3]["remote_state"], "access_token_invalidated")
+        self.assertEqual(sleep_mock.call_count, 1)
 
 
 if __name__ == "__main__":
