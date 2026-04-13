@@ -388,7 +388,7 @@ CAMOUFOX_VERSION=135.0.1 CAMOUFOX_RELEASE=beta.24 docker compose build app
 
 ### Nguồn email tạm thời
 
-Dự án hỗ trợ自建 email tạm thời qua Cloudflare Worker, nguồn giải pháp từ:
+Dự án hỗ trợ tự triển khai email tạm thời qua Cloudflare Worker, nguồn giải pháp từ:
 
 - <https://github.com/dreamhunter2333/cloudflare_temp_email>
 
