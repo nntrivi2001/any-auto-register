@@ -394,6 +394,128 @@ CAMOUFOX_VERSION=135.0.1 CAMOUFOX_RELEASE=beta.24 docker compose build app
 - 若依赖 `conda`、Go 或 Windows 可执行文件，不建议直接在当前 Linux 容器中启动这些插件
 - 如果你只需要 Web UI、账号管理、任务调度和本地 Solver，当前 Compose 配置可直接使用
 
+## Qwen 批量注册与 OAuth 接入（9router）
+
+本项目提供了一套经过验证的 Qwen 账号批量注册脚本，自动完成注册 → 邮箱激活 → OAuth 授权 → 添加到 9router 的完整流程。
+
+### 前置要求
+
+| 依赖 | 说明 |
+| --- | --- |
+| **9router** | 本地运行中的 9router 服务，默认地址 `http://localhost:20128` |
+| **Playwright** | 已安装 Chromium 浏览器：`python -m playwright install chromium` |
+| **requests** | Python HTTP 库：`pip install requests` |
+| **mail.tm** | 脚本自动注册临时邮箱，无需额外配置 |
+
+### 文件位置
+
+```text
+tools/qwen_batch_register.py    # 批量注册主脚本
+tools/qwen_9router_oauth.py     # 单账号 OAuth 手动调试脚本
+```
+
+### 快速开始
+
+#### 1. 确认 9router 已启动
+
+```bash
+curl http://localhost:20128/api/providers
+```
+
+正常返回应包含 `"connections"` 字段。
+
+#### 2. 配置注册数量
+
+编辑 `tools/qwen_batch_register.py`，修改 `TARGET` 变量：
+
+```python
+TARGET = 30  # 你想要在 9router 中保留的 Qwen 账号总数
+```
+
+脚本会自动检测 9router 中已有的账号数量，只创建不足的部分。
+
+#### 3. 运行脚本
+
+```bash
+cd tools
+python qwen_batch_register.py
+```
+
+#### 4. 查看结果
+
+脚本运行结束后会输出汇总：
+
+```
+==================================================
+  Results Summary
+==================================================
+  Success: 25
+  Failed: 1
+  Total in 9router: 30
+==================================================
+  [success                       ] qwenxxxxx@domain.com
+  [failed_registration           ] qwenyyyyy@domain.com
+  ...
+```
+
+### 完整工作流程
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Step 1: Get device code from 9router                           │
+│    GET /api/oauth/qwen/device-code                              │
+│    → deviceCode, userCode, codeVerifier, verificationUriComplete│
+├─────────────────────────────────────────────────────────────────┤
+│  Step 2: Create temp email via mail.tm                          │
+│    POST /accounts → POST /token → email ready                   │
+├─────────────────────────────────────────────────────────────────┤
+│  Step 3: Register Qwen account (headless browser)               │
+│    Fill: username, email, password, terms checkbox → Submit     │
+│    → JWT token in cookie = registration success                 │
+├─────────────────────────────────────────────────────────────────┤
+│  Step 4: Wait for activation email                              │
+│    Poll mail.tm API until activation link arrives               │
+│    → Open activation link IN BROWSER (confirms activation)      │
+├─────────────────────────────────────────────────────────────────┤
+│  Step 5: Open OAuth authorize page                              │
+│    Navigate to verification_uri_complete (includes client param)│
+│    → Click "Confirm" button                                     │
+├─────────────────────────────────────────────────────────────────┤
+│  Step 6: Poll for OAuth token                                   │
+│    POST /api/oauth/qwen/poll {deviceCode, codeVerifier}         │
+│    → Connection added to 9router!                               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 常见失败类型
+
+| 状态 | 原因 | 解决方式 |
+| --- | --- | --- |
+| `failed_registration` | 提交后无 token cookie | Qwen 风控，重试即可 |
+| `failed_form_fill` | 表单加载超时 | 网络问题，增加重试间隔 |
+| `failed_oauth` | "Confirm" 按钮点击后无 token | 会话过期，重新运行脚本 |
+| `failed_activation_email` | 未收到激活邮件 | mail.tm 延迟，等待更久 |
+| `failed_device_code` | 9router 未响应 | 确认 9router 正在运行 |
+
+### 注意事项
+
+- **设备码有效期 900 秒**：脚本优先获取设备码再注册，避免注册过程中设备码过期
+- **Qwen 风控**：连续注册过多会触发风控，表现为注册失败或无 token cookie，建议间隔几分钟再运行
+- **密码统一**：所有注册使用相同密码 `*dbs3211`（可在脚本 `PASSWORD` 变量中修改）
+- **浏览器反检测**：脚本隐藏 `navigator.webdriver`、使用 Windows UA、禁用自动化标记
+
+### 单账号手动调试
+
+如需单独注册一个 Qwen 账号并接入 9router，可使用：
+
+```bash
+python tools/qwen_9router_oauth.py
+```
+
+该脚本适合调试 OAuth 流程、验证设备码和手动排查问题。
+
+---
+
 ## 插件与外部依赖
 
 ### 临时邮箱方案来源

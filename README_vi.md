@@ -384,6 +384,73 @@ CAMOUFOX_VERSION=135.0.1 CAMOUFOX_RELEASE=beta.24 docker compose build app
 - Nếu phụ thuộc vào `conda`, Go hoặc file thực thi Windows, không khuyến nghị chạy trực tiếp trong Linux container hiện tại
 - Nếu chỉ cần Web UI, quản lý tài khoản, điều phối tác vụ và Solver cục bộ, cấu hình Compose hiện tại có thể sử dụng trực tiếp
 
+## Đăng ký hàng loạt tài khoản Qwen & OAuth (9router)
+
+Dự án cung cấp script đã được kiểm chứng để đăng ký hàng loạt tài khoản Qwen, tự động hoàn thành quy trình: đăng ký → kích hoạt email → ủy quyền OAuth → thêm vào 9router.
+
+### Yêu cầu
+
+| Phụ thuộc | Mô tả |
+| --- | --- |
+| **9router** | Dịch vụ 9router đang chạy, mặc định `http://localhost:20128` |
+| **Playwright** | Đã cài Chromium: `python -m playwright install chromium` |
+| **requests** | `pip install requests` |
+| **mail.tm** | Script tự động đăng ký email tạm, không cần cấu hình thêm |
+
+### Tệp tin
+
+```text
+tools/qwen_batch_register.py    # Script chính đăng ký hàng loạt
+tools/qwen_9router_oauth.py     # Script OAuth thủ công cho một tài khoản
+```
+
+### Bắt đầu nhanh
+
+#### 1. Kiểm tra 9router đang chạy
+
+```bash
+curl http://localhost:20128/api/providers
+```
+
+#### 2. Cấu hình số lượng
+
+Chỉnh biến `TARGET` trong `tools/qwen_batch_register.py`:
+
+```python
+TARGET = 30  # Tổng số tài khoản Qwen bạn muốn trong 9router
+```
+
+Script tự động phát hiện số tài khoản hiện có và chỉ tạo phần thiếu.
+
+#### 3. Chạy script
+
+```bash
+cd tools
+python qwen_batch_register.py
+```
+
+### Quy trình hoạt động
+
+```
+1. Lấy device code từ 9router
+   → deviceCode, userCode, codeVerifier, verificationUriComplete
+2. Tạo email tạm qua mail.tm
+3. Đăng ký tài khoản Qwen (headless browser)
+   → JWT token trong cookie = thành công
+4. Chờ email kích hoạt, mở link kích hoạt trên trình duyệt
+5. Mở trang OAuth authorize → nhấn "Confirm"
+6. Poll token từ 9router → Connection được thêm!
+```
+
+### Lưu ý
+
+- **Thiết mã hiệu lực 900 giây**: Script lấy device code trước khi đăng ký, tránh hết hạn
+- **Phong tỏa Qwen**: Đăng ký liên tục nhiều sẽ bị风控, biểu hiện là không có token cookie
+- **Mật khẩu mặc định**: `*dbs3211` (có thể sửa trong biến `PASSWORD`)
+- **Chống phát hiện**: Ẩn `navigator.webdriver`, dùng UA Windows, vô hiệu hóa automation flag
+
+---
+
 ## Plugin & phụ thuộc bên ngoài
 
 ### Nguồn email tạm thời

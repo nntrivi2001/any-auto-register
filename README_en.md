@@ -384,6 +384,73 @@ CAMOUFOX_VERSION=135.0.1 CAMOUFOX_RELEASE=beta.24 docker compose build app
 - If you depend on `conda`, Go, or Windows executables, it is not recommended to run these directly in the current Linux container
 - If you only need Web UI, account management, task scheduling, and local Solver, the current Compose configuration works out of the box
 
+## Qwen Batch Registration & OAuth (9router)
+
+This project provides a proven batch registration script for Qwen accounts that automates the full flow: registration → email activation → OAuth authorization → add to 9router.
+
+### Prerequisites
+
+| Dependency | Description |
+| --- | --- |
+| **9router** | A running 9router service, default at `http://localhost:20128` |
+| **Playwright** | Chromium installed: `python -m playwright install chromium` |
+| **requests** | `pip install requests` |
+| **mail.tm** | Script auto-registers temp email, no extra config needed |
+
+### Files
+
+```text
+tools/qwen_batch_register.py    # Main batch registration script
+tools/qwen_9router_oauth.py     # Single-account OAuth manual debug script
+```
+
+### Quick Start
+
+#### 1. Verify 9router is running
+
+```bash
+curl http://localhost:20128/api/providers
+```
+
+#### 2. Configure target count
+
+Edit the `TARGET` variable in `tools/qwen_batch_register.py`:
+
+```python
+TARGET = 30  # Total number of Qwen accounts you want in 9router
+```
+
+The script automatically detects existing accounts and only creates the missing ones.
+
+#### 3. Run the script
+
+```bash
+cd tools
+python qwen_batch_register.py
+```
+
+### How It Works
+
+```
+1. Get device code from 9router
+   → deviceCode, userCode, codeVerifier, verificationUriComplete
+2. Create temp email via mail.tm
+3. Register Qwen account (headless browser)
+   → JWT token in cookie = success
+4. Wait for activation email, open activation link in browser
+5. Open OAuth authorize page → click "Confirm"
+6. Poll token from 9router → Connection added!
+```
+
+### Notes
+
+- **Device code expires in 900 seconds**: The script gets the device code before registration to avoid expiry
+- **Qwen rate limiting**: Too many consecutive registrations will trigger anti-bot measures (no token cookie) — wait a few minutes between runs
+- **Default password**: `*dbs3211` (change via the `PASSWORD` variable)
+- **Anti-detection**: Hides `navigator.webdriver`, uses Windows UA, disables automation markers
+
+---
+
 ## Plugins & External Dependencies
 
 ### Temporary Email Source
