@@ -1,4 +1,11 @@
-"""Qwen (chat.qwen.ai) platform plugin for Any Auto Register."""
+"""Qwen (chat.qwen.ai) platform plugin for Any Auto Register.
+
+Registration flow (verified):
+    - Fill form (Name + Email + Password + Confirm + Terms) → Submit
+    - JWT token issued immediately in "token" cookie
+    - Activation email sent — account needs activation link visit
+    - Activation URL is called via API to complete registration
+"""
 
 from core.base_platform import BasePlatform, Account, AccountStatus, RegisterConfig
 from core.base_mailbox import BaseMailbox
@@ -10,7 +17,7 @@ class QwenPlatform(BasePlatform):
     name = "qwen"
     display_name = "Qwen"
     version = "1.0.0"
-    # Qwen registration requires browser automation (OTP + Turnstile)
+    # Qwen requires browser automation (form fill + submit)
     supported_executors = ["headless", "headed"]
 
     def __init__(self, config: RegisterConfig = None, mailbox: BaseMailbox = None):
@@ -18,7 +25,11 @@ class QwenPlatform(BasePlatform):
         self.mailbox = mailbox
 
     def register(self, email: str, password: str = None) -> Account:
-        from platforms.qwen.core import QwenRegister
+        from platforms.qwen.core import (
+            QwenRegister,
+            call_activation_api,
+            extract_activation_link,
+        )
 
         log = getattr(self, "_log_fn", print)
 
@@ -27,33 +38,58 @@ class QwenPlatform(BasePlatform):
         if not email:
             raise RuntimeError("Qwen registration requires an email address")
 
-        log(f"邮箱: {email}")
+        log(f"Email: {email}")
         before_ids = self.mailbox.get_current_ids(mail_acct) if mail_acct else set()
         otp_timeout = self.get_mailbox_otp_timeout()
 
-        def otp_cb():
-            log("等待 OTP 验证码...")
-            code = self.mailbox.wait_for_code(
-                mail_acct,
-                keyword="",
-                timeout=otp_timeout,
-                before_ids=before_ids,
-            )
-            if code:
-                log(f"验证码: {code}")
-            return code
-
         with self._make_executor() as ex:
             reg = QwenRegister(executor=ex, log_fn=log)
-            result = reg.register(
+            result = reg.register(email=email, password=password)
+
+        if result.get("status") != "success":
+            return Account(
+                platform="qwen",
                 email=email,
-                password=password,
-                otp_callback=otp_cb if self.mailbox else None,
+                password=password or "",
+                token="",
+                status=AccountStatus.REGISTERED,
+                extra={"error": "Registration failed — no token cookie"},
             )
 
         tokens = result.get("tokens", {})
-        access_token = tokens.get("access_token", tokens.get("token", ""))
-        refresh_token = tokens.get("refresh_token", tokens.get("refreshToken", ""))
+        # Token is in cookie:token from Qwen
+        access_token = (
+            tokens.get("token")
+            or tokens.get("cookie:token")
+            or tokens.get("access_token", "")
+        )
+
+        # Try activation if mailbox available
+        activated = False
+        if self.mailbox and mail_acct:
+            log("Waiting for activation email...")
+            activation_link = None
+            for _ in range(min(10, otp_timeout // 5)):
+                import time
+                time.sleep(3)
+                try:
+                    messages = self.mailbox.get_messages(mail_acct, before_ids=before_ids)
+                    for msg in messages:
+                        body = self.mailbox.get_message_body(mail_acct, msg.get("id")) or ""
+                        link = extract_activation_link(body)
+                        if link:
+                            activation_link = link
+                            break
+                    if activation_link:
+                        break
+                except Exception:
+                    continue
+
+            if activation_link:
+                log(f"Activation link found, activating...")
+                act_result = call_activation_api(activation_link)
+                activated = act_result.get("ok", False)
+                log(f"Activation: {'SUCCESS' if activated else 'FAILED'}")
 
         return Account(
             platform="qwen",
@@ -62,7 +98,8 @@ class QwenPlatform(BasePlatform):
             token=access_token,
             status=AccountStatus.REGISTERED,
             extra={
-                "refresh_token": refresh_token,
+                "activated": activated,
+                "full_name": result.get("full_name", ""),
                 "raw_tokens": tokens,
             },
         )
@@ -76,7 +113,6 @@ class QwenPlatform(BasePlatform):
             return False
 
         try:
-            # Try to access user profile endpoint
             r = curl_req.get(
                 "https://chat.qwen.ai/api/v1/user/profile",
                 headers={
@@ -97,17 +133,57 @@ class QwenPlatform(BasePlatform):
     def get_platform_actions(self) -> list:
         """Return platform-specific actions."""
         return [
-            {"id": "get_user_info", "label": "获取用户信息", "params": []},
+            {"id": "activate_account", "label": "Activate Account", "params": []},
+            {"id": "get_user_info", "label": "Get User Info", "params": []},
         ]
 
     def execute_action(self, action_id: str, account: Account, params: dict) -> dict:
         """Execute platform-specific actions."""
-        if action_id == "get_user_info":
-            from curl_cffi import requests as curl_req
+        from curl_cffi import requests as curl_req
+        from platforms.qwen.core import call_activation_api
 
+        if action_id == "activate_account":
+            # Try to find activation link from email and activate
+            if not self.mailbox:
+                return {"ok": False, "error": "No mailbox configured for activation"}
+
+            email = account.email
+            password = account.password or ""
+            mail_acct = self.mailbox.get_email()
+            if not mail_acct or mail_acct.email != email:
+                return {"ok": False, "error": f"No mailbox for {email}"}
+
+            try:
+                from platforms.qwen.core import extract_activation_link
+                import time
+
+                before_ids = self.mailbox.get_current_ids(mail_acct)
+                activation_link = None
+                for _ in range(24):  # 120s
+                    time.sleep(5)
+                    messages = self.mailbox.get_messages(mail_acct, before_ids=before_ids)
+                    for msg in messages:
+                        body = self.mailbox.get_message_body(mail_acct, msg.get("id")) or ""
+                        link = extract_activation_link(body)
+                        if link:
+                            activation_link = link
+                            break
+                    if activation_link:
+                        break
+
+                if activation_link:
+                    act_result = call_activation_api(activation_link)
+                    if act_result.get("ok"):
+                        return {"ok": True, "message": "Account activated"}
+                    return {"ok": False, "error": f"Activation failed: {act_result}"}
+                return {"ok": False, "error": "No activation email found"}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+
+        if action_id == "get_user_info":
             token = account.token
             if not token:
-                return {"ok": False, "error": "账号缺少 token"}
+                return {"ok": False, "error": "Account missing token"}
 
             try:
                 r = curl_req.get(
@@ -125,8 +201,8 @@ class QwenPlatform(BasePlatform):
                 )
                 if r.status_code == 200:
                     return {"ok": True, "data": r.json()}
-                return {"ok": False, "error": f"获取失败: HTTP {r.status_code}"}
+                return {"ok": False, "error": f"Failed: HTTP {r.status_code}"}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
-        raise NotImplementedError(f"未知操作: {action_id}")
+        raise NotImplementedError(f"Unknown action: {action_id}")
