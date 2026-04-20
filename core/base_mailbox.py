@@ -711,7 +711,7 @@ class LaoudoMailbox(BaseMailbox):
     def wait_for_code(
         self,
         account: MailboxAccount,
-        keyword: str = "trae",
+        keyword: str = "",
         timeout: int = 120,
         before_ids: set = None,
         code_pattern: str = None,
@@ -791,7 +791,7 @@ class AitreMailbox(BaseMailbox):
     def wait_for_code(
         self,
         account: MailboxAccount,
-        keyword: str = "trae",
+        keyword: str = "",
         timeout: int = 120,
         before_ids: set = None,
         code_pattern: str = None,
